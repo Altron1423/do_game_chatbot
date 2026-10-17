@@ -73,7 +73,7 @@ class GameTests(unittest.TestCase):
     def test_round_starts_only_registered_tanks_no_bots(self):
         self.game.join(self.room, "Аня")
         self.room.countdown_ends_at = time.time() - 1
-        self.game.tick()
+        self.game.process_room_events(self.room)
         self.assertEqual(self.room.phase, "round")
         self.assertEqual([tank.name for tank in self.room.tanks], ["Аня"])
         self.assertTrue(all(not tank.is_bot for tank in self.room.tanks))
@@ -81,12 +81,30 @@ class GameTests(unittest.TestCase):
     def test_only_registered_tank_receives_command(self):
         self.begin_round()
         player = self.room.tanks[0]
+        player.is_bot = False
+        player.name = "Игрок"
         spectator = self.game.post_message(self.room, "Зритель", "вправо")
         self.assertFalse(spectator["is_command"])
         self.assertEqual(player.direction, "вверх")
         command = self.game.post_message(self.room, "Игрок", " ВЛЕВО ")
         self.assertTrue(command["is_command"])
         self.assertEqual(player.direction, "влево")
+
+    def test_commands_apply_immediately_in_order(self):
+        self.begin_round()
+        player = self.room.tanks[0]
+        player.is_bot = False
+        player.name = "Игрок"
+        for tank in self.room.tanks[1:]:
+            tank.next_bot_command_at = time.monotonic() + 10
+        start_position = (player.x, player.y)
+
+        self.game.post_message(self.room, "Игрок", "вправо")
+        self.assertEqual(player.direction, "вправо")
+        self.game.post_message(self.room, "Игрок", "вниз")
+
+        self.assertEqual(player.direction, "вниз")
+        self.assertEqual((player.x, player.y), start_position)
 
     def test_shot_limit_increases_after_star_bonus(self):
         self.begin_round()
@@ -102,7 +120,7 @@ class GameTests(unittest.TestCase):
         self.begin_round()
         player = self.room.tanks[0]
         player.last_command_at = time.monotonic() - 31
-        self.game.tick()
+        self.game.process_room_events(self.room)
         self.assertTrue(player.is_bot)
 
     def test_bots_send_commands_as_chat_messages(self):
@@ -111,7 +129,7 @@ class GameTests(unittest.TestCase):
         for tank in self.room.tanks:
             if tank.is_bot:
                 tank.next_bot_command_at = now - 1
-        self.game.tick(now)
+        self.game.process_room_events(self.room, now)
         bot_messages = [message for message in self.room.messages if message["sender"].startswith("Бот ")]
         self.assertEqual(len(bot_messages), 9)
         self.assertTrue(all(message["is_command"] for message in bot_messages))
@@ -138,7 +156,7 @@ class GameTests(unittest.TestCase):
         )
         self.room.countdown_ends_at = time.time() + 5
         self.room.next_countdown_message_at = None
-        self.game.tick()
+        self.game.process_room_events(self.room)
         self.assertIn(
             "Старт через 5 с",
             [message["text"] for message in self.room.messages if message["sender"] == "Комната"],

@@ -1,4 +1,3 @@
-import asyncio
 import math
 import random
 import time
@@ -34,10 +33,10 @@ DIRECTIONS = {
     "вправо": (1, 0),
 }
 TILE_SIZE = 32
-TICK_SECONDS = 1 / 15
 COUNTDOWN_SECONDS = 15
 BOT_COMMAND_SECONDS = 1
 PLAYER_IDLE_SECONDS = 30
+SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
 # Ограничения на количество танков.
@@ -125,6 +124,8 @@ class Room:
     spawn_points: list[tuple[int, int]] = field(default_factory=list)
     wins: dict[str, int] = field(default_factory=dict)
     wins_awarded: bool = False
+    state_version: int = 0
+    last_simulated_at: float = field(default_factory=time.monotonic)
     updated_at: float = field(default_factory=time.time)
     # Счётчик выданных цветов, чтобы назначать их строго по порядку.
     color_counter: int = 0
@@ -328,16 +329,8 @@ class Game:
         highlighted = normalized in COMMANDS and tank is not None
         if tank is not None and normalized in COMMANDS:
             tank.last_command_at = time.monotonic()
-            if room.phase != "round":
-                pass
-            elif tank.frozen_until <= time.monotonic():
-                if normalized in DIRECTIONS:
-                    if tank.direction == normalized:
-                        self._move_tank_one_tile(room, tank, normalized)
-                    else:
-                        tank.direction = normalized
-                elif normalized == "выстрел":
-                    self.fire(room, tank)
+            if room.phase == "round":
+                self._apply_command(room, tank, normalized)
 
         message = {
             "id": room.next_message_id,
@@ -501,6 +494,7 @@ class Game:
         room.phase = "round"
         room.countdown_ends_at = None
         room.next_countdown_message_at = None
+        room.last_simulated_at = time.monotonic()
         room.updated_at = time.time()
 
     def fire(self, room: Room, tank: Tank) -> None:
@@ -539,6 +533,17 @@ class Game:
         tank.x = nx
         tank.y = ny
         return True
+
+    def _apply_command(self, room: Room, tank: Tank, command: str) -> None:
+        if not tank.alive or tank.frozen_until > time.monotonic():
+            return
+        if command in DIRECTIONS:
+            if tank.direction == command:
+                self._move_tank_one_tile(room, tank, command)
+            else:
+                tank.direction = command
+        elif command == "выстрел":
+            self.fire(room, tank)
 
     def _move_shells(self, room: Room, dt: float) -> None:
         for tank in room.tanks:
@@ -741,6 +746,7 @@ class Game:
         room.phase = "countdown"
         room.countdown_ends_at = time.time() + COUNTDOWN_SECONDS
         room.next_countdown_message_at = COUNTDOWN_SECONDS
+        room.last_simulated_at = time.monotonic()
         room.wins_awarded = False
         room.bot_wave_index = 0
         room.next_bot_wave_at = None
@@ -762,84 +768,115 @@ class Game:
         room.next_bot_wave_at = None
         room.next_bot_index = 1
 
-    def tick(self, now: float | None = None) -> None:
-        now = time.monotonic() if now is None else now
+    def next_room_event_delay(self, room: Room) -> float | None:
+        monotonic_now = time.monotonic()
         wall_now = time.time()
-        for room in self.rooms.values():
-            if room.phase == "countdown":
-                if room.countdown_ends_at is not None and wall_now >= room.countdown_ends_at:
-                    self.start_round(room)
-                    self.post_game_message(room, "Старт! Раунд начался.")
-                    continue
-                remaining = math.ceil(room.countdown_ends_at - wall_now) if room.countdown_ends_at is not None else 0
-                if room.next_countdown_message_at is None:
-                    room.next_countdown_message_at = 0
-                if remaining > 0 and remaining != room.next_countdown_message_at:
-                    if remaining in (3, 2, 1):
-                        self.post_message(room, "Комната", f"Старт через {remaining} с")
-                    elif remaining == 5:
-                        self.post_message(room, "Комната", "Старт через 5 с")
-                    room.next_countdown_message_at = remaining
-                continue
-            if room.phase != "round":
-                continue
+        delays: list[float] = []
 
-            # --- Волны ботов -------------------------------------------------
-            if room.next_bot_wave_at is not None and wall_now >= room.next_bot_wave_at:
-                if room.bot_wave_index < len(BOT_WAVE_SIZES):
-                    size = BOT_WAVE_SIZES[room.bot_wave_index]
-                    added = self._add_bot_wave(room, size)
-                    if added:
-                        self.post_game_message(
-                            room,
-                            f"Подкрепление: +{added} бот(ов). "
-                            f"Всего танков: {len(room.tanks)}.",
-                        )
-                    room.bot_wave_index += 1
-                self._schedule_next_bot_wave(room)
+        if room.phase == "countdown" and room.countdown_ends_at is not None:
+            countdown_remaining = room.countdown_ends_at - wall_now
+            delays.append(max(0, countdown_remaining))
+            seconds_remaining = math.ceil(countdown_remaining)
+            if seconds_remaining > 0:
+                delays.append(max(0, countdown_remaining - (seconds_remaining - 1)))
+            for threshold in (5, 3, 2, 1):
+                if countdown_remaining > threshold and (
+                    room.next_countdown_message_at is None
+                    or room.next_countdown_message_at > threshold
+                ):
+                    delays.append(max(0, countdown_remaining - threshold))
 
-            # --- Логика танков ----------------------------------------------
+        if room.phase == "round":
+            if room.next_bot_wave_at is not None:
+                delays.append(max(0, room.next_bot_wave_at - wall_now))
             for tank in room.tanks:
                 if not tank.alive:
                     continue
-                if tank.frozen_until > now:
-                    continue
-                if not tank.is_bot and now - tank.last_command_at >= PLAYER_IDLE_SECONDS:
-                    tank.is_bot = True
-                    tank.next_bot_command_at = now
-                if tank.is_bot and now >= tank.next_bot_command_at:
-                    command = self._bot_command(room, tank)
-                    if command is not None:
-                        self.post_message(room, tank.name, command, is_bot=True)
-                    tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
+                if tank.shield_until > monotonic_now:
+                    delays.append(tank.shield_until - monotonic_now)
+                if tank.frozen_until > monotonic_now:
+                    delays.append(tank.frozen_until - monotonic_now)
+                elif tank.is_bot:
+                    delays.append(max(0, tank.next_bot_command_at - monotonic_now))
+                else:
+                    delays.append(max(0, tank.last_command_at + PLAYER_IDLE_SECONDS - monotonic_now))
+            for bonus in room.bonuses:
+                delays.append(max(0, bonus.expires_at - monotonic_now))
+            if any(tank.shells for tank in room.tanks):
+                delays.append(SHELL_EVENT_SECONDS)
 
-            self._move_shells(room, TICK_SECONDS)
-            self._collect_bonuses(room)
+        return min(delays) if delays else None
 
-            alive_all = self._alive_all(room)
-            alive_players = self._alive_players(room)
+    def process_room_events(self, room: Room, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        wall_now = time.time()
+        elapsed = max(0, now - room.last_simulated_at)
+        room.last_simulated_at = now
 
-            # Победа: остался ровно один живой танк
-            if len(alive_all) == 1:
-                self._award_wins(room, alive_all[0])
-                self._finish_round(room)
+        if room.phase == "countdown":
+            if room.countdown_ends_at is not None and wall_now >= room.countdown_ends_at:
+                self.start_round(room)
+                self.post_game_message(room, "Старт! Раунд начался.")
+                return
+            remaining = math.ceil(room.countdown_ends_at - wall_now) if room.countdown_ends_at is not None else 0
+            if remaining > 0 and remaining != room.next_countdown_message_at:
+                if remaining in (5, 3, 2, 1):
+                    self.post_message(room, "Комната", f"Старт через {remaining} с")
+                room.next_countdown_message_at = remaining
+                room.updated_at = wall_now
+            return
+        if room.phase != "round":
+            return
+
+        if room.next_bot_wave_at is not None and wall_now >= room.next_bot_wave_at:
+            if room.bot_wave_index < len(BOT_WAVE_SIZES):
+                size = BOT_WAVE_SIZES[room.bot_wave_index]
+                added = self._add_bot_wave(room, size)
+                if added:
+                    self.post_game_message(
+                        room,
+                        f"Подкрепление: +{added} бот(ов). Всего танков: {len(room.tanks)}.",
+                    )
+                room.bot_wave_index += 1
+            self._schedule_next_bot_wave(room)
+
+        self._move_shells(room, elapsed)
+        self._collect_bonuses(room)
+
+        for tank in room.tanks:
+            if not tank.alive:
                 continue
-
-            # Все люди мертвы, но боты ещё живы — новый раунд с таймером
-            if not alive_players and alive_all:
-                self._restart_round(room)
+            if not tank.is_bot and now - tank.last_command_at >= PLAYER_IDLE_SECONDS:
+                tank.is_bot = True
+                tank.next_bot_command_at = now
+            if tank.frozen_until > now:
                 continue
+            if tank.is_bot and now >= tank.next_bot_command_at:
+                command = self._bot_command(room, tank)
+                if command is not None:
+                    self.post_message(room, tank.name, command, is_bot=True)
+                tank.next_bot_command_at = now + BOT_COMMAND_SECONDS
 
-            # Никого живого не осталось — полный сброс
-            if not alive_all:
-                self._finish_round(room)
+        self._collect_bonuses(room)
 
-            room.updated_at = wall_now
+        alive_all = self._alive_all(room)
+        alive_players = self._alive_players(room)
+        if len(alive_all) == 1:
+            self._award_wins(room, alive_all[0])
+            self._finish_round(room)
+            return
+        if not alive_players and alive_all:
+            self._restart_round(room)
+            return
+        if not alive_all:
+            self._finish_round(room)
+        room.updated_at = wall_now
 
     def room_state(self, room: Room) -> dict:
         tiles = room.tiles or MAP_TEMPLATE
         return {
             **self.room_summary(room),
+            "state_version": room.state_version,
             "map": {"width": MAP_WIDTH, "height": MAP_HEIGHT, "tiles": tiles},
             "tanks": [
                 {

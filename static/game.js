@@ -5,13 +5,13 @@ const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
 const chat = document.querySelector("#chat");
 const winsList = document.querySelector("#wins-list");
-const STATE_POLL_INTERVAL_MS = 100;
 const ROOM_LIST_POLL_INTERVAL_MS = 2000;
 let state = null;
-let previousTanks = new Map();
 let receivedAt = 0;
 let shownRoom = "";
 let polling = false;
+let stateRequest = null;
+let stateVersion = null;
 
 // Соответствие русских названий цветов (как их отдаёт сервер)
 // и CSS-цветов для canvas. Canvas понимает только CSS-цвета,
@@ -39,17 +39,14 @@ function tileColor(type) {
 
 function draw() {
   if (!state) {
-    requestAnimationFrame(draw);
+    ctx.clearRect(0, 0, board.width, board.height);
     return;
   }
   const mapWidth = state.map?.width || 26;
   const mapHeight = state.map?.height || 13;
   const canvasLeft = document.querySelector(".arena > #board") || board;
   const size = Math.min(canvasLeft.clientWidth || 800, canvasLeft.clientHeight || 600);
-  if (!size) {
-    requestAnimationFrame(draw);
-    return;
-  }
+  if (!size) return;
   const maxByHeight = (canvasLeft.clientHeight || 600) / mapHeight * mapWidth;
   const pixels = Math.min(Math.round(size * (window.devicePixelRatio || 1)), Math.round((canvasLeft.clientWidth || 800) * (window.devicePixelRatio || 1)), Math.round(maxByHeight * (window.devicePixelRatio || 1)));
   if (board.width !== pixels || board.height !== Math.round(pixels / mapWidth * mapHeight)) {
@@ -102,13 +99,9 @@ function draw() {
     ctx.arc(shell.x, shell.y, .09, 0, Math.PI * 2);
     ctx.fill();
   }
-  const interpolation = Math.min(1, (performance.now() - receivedAt) / 100);
   for (const tank of state.tanks) {
     if (!tank.alive) continue;
-    const from = previousTanks.get(tank.id) || tank;
-    const x = from.x + (tank.x - from.x) * interpolation;
-    const y = from.y + (tank.y - from.y) * interpolation;
-    drawTank(x, y, tank.direction, tank.is_bot, tank.shielded, tank.color);
+    drawTank(tank.x, tank.y, tank.direction, tank.is_bot, tank.shielded, tank.color);
   }
   const remaining = state && state.countdown_ends_at ? remainingSeconds(state, performance.now()) : null;
   if (remaining != null) {
@@ -125,7 +118,6 @@ function draw() {
     ctx.fillStyle = "#f3f6f8";
     ctx.fillText(state.status === "countdown" ? "СТАРТ ЧЕРЕЗ" : "РАУНД ИДЁТ", mapWidth / 2, mapHeight / 2 + .4);
   }
-  requestAnimationFrame(draw);
 }
 
 function drawBonus(type, cx, cy) {
@@ -254,17 +246,23 @@ async function pollState() {
     const roomId = select.value;
     if (!roomId) {
       state = null;
+      draw();
       statusLabel.textContent = "Нет выбранной комнаты";
       showWins({});
       return;
     }
-    const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/state`);
+    stateRequest = new AbortController();
+    const after = stateVersion == null ? "" : `?after=${stateVersion}`;
+    const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/state${after}`, {
+      signal: stateRequest.signal
+    });
     if (!response.ok) throw new Error("Не удалось получить состояние комнаты.");
     const next = await response.json();
     if (roomId !== select.value) return;
-    previousTanks = new Map((state?.tanks || []).map(tank => [tank.id, tank]));
     state = next;
+    stateVersion = next.state_version;
     receivedAt = performance.now();
+    draw();
     showMessages(next.messages, roomId);
     showWins(next.wins);
     statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdownLabel(next)}`;
@@ -273,12 +271,23 @@ async function pollState() {
       : next.status === "countdown"
         ? "Регистрация открыта. Танки появятся после отсчёта."
         : "Раунд идёт. Команды доступны через терминальный клиент.";
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      statusLabel.textContent = error.message;
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
   } finally {
+    stateRequest = null;
     polling = false;
   }
+  if (select.value) pollState();
 }
 
 select.addEventListener("change", () => {
+  stateRequest?.abort();
+  stateVersion = null;
+  state = null;
+  draw();
   shownRoom = "";
   chat.dataset.latest = "0";
   pollState().catch(error => { statusLabel.textContent = error.message; });
@@ -286,6 +295,5 @@ select.addEventListener("change", () => {
 
 loadRooms().then(pollState).catch(error => { statusLabel.textContent = error.message; });
 setInterval(() => loadRooms().catch(error => { statusLabel.textContent = error.message; }), ROOM_LIST_POLL_INTERVAL_MS);
-setInterval(() => pollState().catch(error => { statusLabel.textContent = error.message; }), STATE_POLL_INTERVAL_MS);
 window.addEventListener("resize", draw);
 draw();
