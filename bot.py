@@ -23,7 +23,6 @@ import aiohttp
 
 
 BASE_URL = "http://0.0.0.0:8080"
-ROOM_ID = "1"
 BOT_NAME = "Бот-Разведчик"
 POLL_INTERVAL = 0.15
 COMMAND_COOLDOWN = 0.20
@@ -194,13 +193,13 @@ def path_to_any_goal(tiles, start, goals, blocked):
 # Клиент игры
 # ---------------------------------------------------------------------------
 class BotClient:
-    def __init__(self, base_url, room_id, name):
+    def __init__(self, base_url, name):
         self.base_url = base_url.rstrip("/")
-        self.room_id = room_id
         self.name = name
         self.session = None
         self.last_command_at = 0.0
         self.color = None
+        self.state_version = None
 
     async def __aenter__(self):
         self.session = aiohttp.ClientSession()
@@ -212,23 +211,26 @@ class BotClient:
 
     # -- HTTP-обёртки ------------------------------------------------------
     async def get_state(self):
+        after = "" if self.state_version is None else f"?after={self.state_version}"
         async with self.session.get(
-            f"{self.base_url}/rooms/{self.room_id}/state"
+            f"{self.base_url}/api/state{after}"
         ) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            state = await resp.json()
+            self.state_version = state["state_version"]
+            return state
 
     async def send_message(self, text):
         payload = {"sender": self.name, "text": text}
         async with self.session.post(
-            f"{self.base_url}/rooms/{self.room_id}/messages", json=payload
+            f"{self.base_url}/api/messages", json=payload
         ) as resp:
             resp.raise_for_status()
 
     async def join(self):
         payload = {"name": self.name}
         async with self.session.post(
-            f"{self.base_url}/rooms/{self.room_id}/join", json=payload
+            f"{self.base_url}/api/join", json=payload
         ) as resp:
             resp.raise_for_status()
             data = await resp.json()
@@ -370,7 +372,7 @@ class BotClient:
             print(f"[bot] Не удалось отправить команду: {exc}")
 
     async def run(self):
-        print(f"[bot] Запуск. Комната {self.room_id}, имя {self.name}")
+        print(f"[bot] Запуск в общей комнате, имя {self.name}")
         try:
             await self.join()
             print(f"[bot] Зарегистрирован. Цвет: {self.color}")
@@ -386,7 +388,7 @@ class BotClient:
 # Точка входа
 # ---------------------------------------------------------------------------
 async def main():
-    async with BotClient(BASE_URL, ROOM_ID, BOT_NAME) as bot:
+    async with BotClient(BASE_URL, BOT_NAME) as bot:
         await bot.run()
 
 

@@ -1,14 +1,11 @@
-const select = document.querySelector("#room-select");
 const board = document.querySelector("#board");
 const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
 const chat = document.querySelector("#chat");
 const winsList = document.querySelector("#wins-list");
-const ROOM_LIST_POLL_INTERVAL_MS = 2000;
 let state = null;
 let receivedAt = 0;
-let shownRoom = "";
 let polling = false;
 let stateRequest = null;
 let stateVersion = null;
@@ -180,11 +177,7 @@ function drawTank(x, y, direction, isBot, shielded, color) {
   ctx.restore();
 }
 
-function showMessages(messages, roomId) {
-  if (shownRoom !== roomId) {
-    chat.replaceChildren();
-    shownRoom = roomId;
-  }
+function showMessages(messages) {
   const latest = Number(chat.dataset.latest || 0);
   for (const message of messages) {
     if (message.id <= latest) continue;
@@ -217,17 +210,6 @@ function showWins(wins) {
   }
 }
 
-async function loadRooms() {
-  const response = await fetch("/api/rooms");
-  if (!response.ok) throw new Error("Не удалось загрузить список комнат.");
-  const rooms = await response.json();
-  const selected = select.value;
-  select.replaceChildren(new Option("Выберите комнату", ""));
-  for (const room of rooms) select.add(new Option(`${room.name} (#${room.id}) — ${room.status}`, room.id));
-  if (rooms.some(room => room.id === selected)) select.value = selected;
-  else if (rooms.length && !selected) select.value = rooms[0].id;
-}
-
 function remainingSeconds(next, now) {
   if (!next.countdown_ends_at) return null;
   const serverNow = (next.server_time || Date.now() / 1000) + (now - receivedAt) / 1000;
@@ -243,31 +225,22 @@ async function pollState() {
   if (polling) return;
   polling = true;
   try {
-    const roomId = select.value;
-    if (!roomId) {
-      state = null;
-      draw();
-      statusLabel.textContent = "Нет выбранной комнаты";
-      showWins({});
-      return;
-    }
     stateRequest = new AbortController();
     const after = stateVersion == null ? "" : `?after=${stateVersion}`;
-    const response = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/state${after}`, {
+    const response = await fetch(`/api/state${after}`, {
       signal: stateRequest.signal
     });
     if (!response.ok) throw new Error("Не удалось получить состояние комнаты.");
     const next = await response.json();
-    if (roomId !== select.value) return;
     state = next;
     stateVersion = next.state_version;
     receivedAt = performance.now();
     draw();
-    showMessages(next.messages, roomId);
+    showMessages(next.messages);
     showWins(next.wins);
     statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdownLabel(next)}`;
     hint.textContent = next.status === "waiting"
-      ? "Для регистрации отправьте в терминальном клиенте: «войти " + roomId + " Имя»."
+      ? "Для регистрации отправьте в терминальном клиенте: «войти Имя»."
       : next.status === "countdown"
         ? "Регистрация открыта. Танки появятся после отсчёта."
         : "Раунд идёт. Команды доступны через терминальный клиент.";
@@ -280,20 +253,9 @@ async function pollState() {
     stateRequest = null;
     polling = false;
   }
-  if (select.value) pollState();
+  pollState();
 }
 
-select.addEventListener("change", () => {
-  stateRequest?.abort();
-  stateVersion = null;
-  state = null;
-  draw();
-  shownRoom = "";
-  chat.dataset.latest = "0";
-  pollState().catch(error => { statusLabel.textContent = error.message; });
-});
-
-loadRooms().then(pollState).catch(error => { statusLabel.textContent = error.message; });
-setInterval(() => loadRooms().catch(error => { statusLabel.textContent = error.message; }), ROOM_LIST_POLL_INTERVAL_MS);
+pollState();
 window.addEventListener("resize", draw);
 draw();

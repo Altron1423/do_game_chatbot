@@ -7,7 +7,7 @@ from game import Bonus, COMMANDS, Game, MAP_HEIGHT, MAP_TEMPLATE, MAP_WIDTH, Roo
 class GameTests(unittest.TestCase):
     def setUp(self):
         self.game = Game()
-        self.room = self.game.create_room("Тест")
+        self.room = self.game.room
 
     def begin_round_with_bots(self, names=("Игрок",)):
         """Быстрый старт раунда с ботами (как в игровом цикле)."""
@@ -41,8 +41,8 @@ class GameTests(unittest.TestCase):
                 )
             )
 
-    def test_join_command_registers_in_correct_room(self):
-        message = self.game.post_message(self.room, "Аня", " ВОЙТИ 1 Аня ")
+    def test_join_command_registers_in_shared_room(self):
+        message = self.game.post_message(self.room, "Аня", " ВОЙТИ Аня ")
         self.assertEqual(self.room.registrations, ["Аня"])
         self.assertEqual(self.room.phase, "countdown")
         self.assertGreater(self.room.countdown_ends_at, time.time())
@@ -59,24 +59,19 @@ class GameTests(unittest.TestCase):
         self.assertEqual(self.room.countdown_ends_at, countdown_ends_at)
         self.assertEqual(self.room.registrations, ["Аня", "Борис"])
 
-    def test_join_command_rejects_other_room(self):
-        with self.assertRaisesRegex(ValueError, "не совпадает"):
-            self.game.post_message(self.room, "Аня", "войти 2 Аня")
-        self.assertEqual(self.room.registrations, [])
-
-    def test_room_limits_registrations_to_ten(self):
-        for number in range(10):
+    def test_registration_has_no_player_limit(self):
+        for number in range(100):
             self.game.join(self.room, f"Игрок {number}")
-        with self.assertRaisesRegex(ValueError, "10 игроков"):
-            self.game.join(self.room, "Одиннадцатый")
+        self.assertEqual(len(self.room.registrations), 100)
 
-    def test_round_starts_only_registered_tanks_no_bots(self):
+    def test_round_starts_with_registered_tank_and_bot(self):
         self.game.join(self.room, "Аня")
         self.room.countdown_ends_at = time.time() - 1
         self.game.process_room_events(self.room)
         self.assertEqual(self.room.phase, "round")
-        self.assertEqual([tank.name for tank in self.room.tanks], ["Аня"])
-        self.assertTrue(all(not tank.is_bot for tank in self.room.tanks))
+        self.assertEqual([tank.name for tank in self.room.tanks], ["Аня", "Бот-1"])
+        self.assertFalse(self.room.tanks[0].is_bot)
+        self.assertTrue(self.room.tanks[1].is_bot)
 
     def test_only_registered_tank_receives_command(self):
         self.begin_round()

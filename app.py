@@ -5,26 +5,18 @@ import secrets
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
+from fastapi import FastAPI, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from game import Game, game
+from game import game
 
 
 BASE_DIR = Path(__file__).resolve().parent
-ADMIN_USERNAME = "admin"
-ADMIN_PASSWORD = "tankcity"
-security = HTTPBasic()
 state_condition = asyncio.Condition()
-room_wakeups: dict[str, asyncio.Event] = {}
-room_tasks: dict[str, asyncio.Task] = {}
-
-
-class RoomCreate(BaseModel):
-    name: str = Field(default="Комната", min_length=1, max_length=60)
+room_wakeup = asyncio.Event()
+room_task: Optional[asyncio.Task] = None
 
 
 class JoinRequest(BaseModel):
@@ -36,69 +28,35 @@ class MessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500)
 
 
-def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> None:
-    user_ok = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
-    password_ok = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
-    if not (user_ok and password_ok):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Неверный логин или пароль.",
-            headers={"WWW-Authenticate": "Basic"},
-        )
-
-
-def find_room(room_id: str):
-    room = game.rooms.get(room_id)
-    if room is None:
-        raise HTTPException(status_code=404, detail="Комната не найдена.")
-    return room
-
-
 app = FastAPI(title="Танковый чат")
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
-async def publish_room_event(room_id: str) -> None:
-    room = game.rooms.get(room_id)
-    if room is not None:
-        room.state_version += 1
-        if room_id not in room_tasks or room_tasks[room_id].done():
-            wakeup = asyncio.Event()
-            room_wakeups[room_id] = wakeup
-            room_tasks[room_id] = asyncio.create_task(room_event_loop(room_id, wakeup))
-        room_wakeups[room_id].set()
-    elif room_id in room_wakeups:
-        room_wakeups[room_id].set()
+async def publish_room_event() -> None:
+    global room_task
+    room = game.room
+    room.state_version += 1
+    if room_task is None or room_task.done():
+        room_task = asyncio.create_task(room_event_loop())
+    room_wakeup.set()
     async with state_condition:
         state_condition.notify_all()
 
 
-async def room_event_loop(room_id: str, wakeup: asyncio.Event) -> None:
-    try:
-        while True:
-            room = game.rooms.get(room_id)
-            if room is None:
-                return
-            wakeup.clear()
-            delay = game.next_room_event_delay(room)
-            try:
-                if delay is None:
-                    await wakeup.wait()
-                else:
-                    await asyncio.wait_for(wakeup.wait(), timeout=max(delay, 0.001))
-                continue
-            except TimeoutError:
-                room = game.rooms.get(room_id)
-                if room is None:
-                    return
-                game.process_room_events(room)
-                room.state_version += 1
-                async with state_condition:
-                    state_condition.notify_all()
-    finally:
-        if room_tasks.get(room_id) is asyncio.current_task():
-            room_tasks.pop(room_id, None)
-            room_wakeups.pop(room_id, None)
+async def room_event_loop() -> None:
+    while True:
+        room_wakeup.clear()
+        delay = game.next_room_event_delay(game.room)
+        try:
+            if delay is None:
+                await room_wakeup.wait()
+            else:
+                await asyncio.wait_for(room_wakeup.wait(), timeout=max(delay, 0.001))
+        except asyncio.TimeoutError:
+            game.process_room_events(game.room)
+            game.room.state_version += 1
+            async with state_condition:
+                state_condition.notify_all()
 
 
 @app.get("/", include_in_schema=False)
@@ -106,42 +64,14 @@ async def index():
     return FileResponse(BASE_DIR / "static" / "index.html")
 
 
-@app.get("/admin", include_in_schema=False)
-async def admin_page():
-    return FileResponse(BASE_DIR / "static" / "admin.html")
-
-
-@app.get("/api/rooms")
-async def list_rooms():
-    return [game.room_summary(room) for room in game.rooms.values()]
-
-
-@app.post("/api/rooms", status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_admin)])
-async def create_room(payload: RoomCreate):
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(status_code=422, detail="Название комнаты не может быть пустым.")
-    room = game.create_room(name)
-    await publish_room_event(room.id)
-    return game.room_summary(room)
-
-
-@app.delete("/api/rooms/{room_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_admin)])
-async def delete_room(room_id: str):
-    if not game.delete_room(room_id):
-        raise HTTPException(status_code=404, detail="Комната не найдена.")
-    await publish_room_event(room_id)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@app.post("/api/rooms/{room_id}/join")
-async def join_room(room_id: str, payload: JoinRequest):
-    room = find_room(room_id)
+@app.post("/api/join")
+async def join_room(payload: JoinRequest):
+    room = game.room
     try:
         game.join(room, payload.name)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await publish_room_event(room_id)
+    await publish_room_event()
 
     tank = next(
         (t for t in room.tanks
@@ -155,23 +85,23 @@ async def join_room(room_id: str, payload: JoinRequest):
     }
 
 
-@app.post("/api/rooms/{room_id}/messages", status_code=status.HTTP_201_CREATED)
-async def send_message(room_id: str, payload: MessageRequest):
-    room = find_room(room_id)
+@app.post("/api/messages", status_code=status.HTTP_201_CREATED)
+async def send_message(payload: MessageRequest):
+    room = game.room
     try:
         game.process_room_events(room)
         game.post_message(room, payload.sender, payload.text)
         game.process_room_events(room)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await publish_room_event(room_id)
+    await publish_room_event()
     # Ничего не возвращаем — клиенту не нужен ответ.
     return Response(status_code=status.HTTP_201_CREATED)
 
 
-@app.post("/api/rooms/{room_id}/commands", status_code=status.HTTP_201_CREATED)
-async def send_command(room_id: str, payload: MessageRequest):
-    room = find_room(room_id)
+@app.post("/api/commands", status_code=status.HTTP_201_CREATED)
+async def send_command(payload: MessageRequest):
+    room = game.room
     normalized = payload.text.strip().casefold()
     if normalized not in {"вверх", "вниз", "влево", "вправо", "выстрел"}:
         raise HTTPException(status_code=422, detail="Неизвестная команда.")
@@ -181,18 +111,14 @@ async def send_command(room_id: str, payload: MessageRequest):
         game.process_room_events(room)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    await publish_room_event(room_id)
+    await publish_room_event()
     return Response(status_code=status.HTTP_201_CREATED)
 
 
-@app.get("/api/rooms/{room_id}/state")
-async def room_state(room_id: str, after: Optional[int] = Query(default=None, ge=0)):
-    room = find_room(room_id)
+@app.get("/api/state")
+async def room_state(after: Optional[int] = Query(default=None, ge=0)):
+    room = game.room
     if after is not None and room.state_version == after:
         async with state_condition:
-            await state_condition.wait_for(
-                lambda: room.state_version != after or game.rooms.get(room_id) is not room
-            )
-    if game.rooms.get(room_id) is not room:
-        raise HTTPException(status_code=404, detail="Комната не найдена.")
+            await state_condition.wait_for(lambda: room.state_version != after)
     return game.room_state(room)

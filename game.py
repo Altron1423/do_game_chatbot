@@ -41,10 +41,6 @@ PLAYER_IDLE_SECONDS = 30
 SHELL_EVENT_SECONDS = 0.05
 BONUS_TYPES = ("звезда", "шлем", "часы")
 
-# Ограничения на количество танков.
-MAX_PLAYERS = 8          # сколько игроков может зарегистрироваться
-MAX_TANKS = 40           # общий лимит (игроки + боты)
-
 # Расписание волн ботов: на старте 1, через 30 с — 2, через 60 с — 3,
 # и так до 7 на 180-й секунде. После этого волн больше нет.
 BOT_WAVE_SIZES = [1, 2, 3, 4, 5, 6, 7]
@@ -217,18 +213,7 @@ def _bfs_next_step(tiles: list[list[int]],
 
 class Game:
     def __init__(self) -> None:
-        self.rooms: dict[str, Room] = {}
-
-    def create_room(self, name: str) -> Room:
-        room_id = "1"
-        while room_id in self.rooms:
-            room_id = str(int(room_id) + 1)
-        room = Room(id=room_id, name=name)
-        self.rooms[room.id] = room
-        return room
-
-    def delete_room(self, room_id: str) -> bool:
-        return self.rooms.pop(room_id, None) is not None
+        self.room = Room(id="1", name="Общая")
 
     def room_summary(self, room: Room) -> dict:
         return {
@@ -271,9 +256,6 @@ class Game:
             raise ValueError("Раунд уже идёт. Регистрация откроется после его завершения.")
         if any(player.casefold() == name.casefold() for player in room.registrations):
             raise ValueError("Это имя уже зарегистрировано в комнате.")
-        if len(room.registrations) >= MAX_PLAYERS:
-            raise ValueError(f"В комнате уже зарегистрированы {MAX_PLAYERS} игроков.")
-
         room.registrations.append(name)
         self._ensure_map(room)
 
@@ -311,12 +293,10 @@ class Game:
         if not text or len(text) > 500:
             raise ValueError("Сообщение должно содержать от 1 до 500 символов.")
 
-        join_match = text.split(maxsplit=2)
-        if len(join_match) == 3 and join_match[0].casefold() == "войти":
-            if join_match[1] != room.id:
-                raise ValueError("Номер комнаты в команде не совпадает.")
+        join_match = text.split(maxsplit=1)
+        if len(join_match) == 2 and join_match[0].casefold() == "войти":
             if room.phase != "round":
-                self.join(room, join_match[2])
+                self.join(room, join_match[1])
 
         tank = next(
             (
@@ -391,7 +371,7 @@ class Game:
         selected: list[tuple[int, int]] = []
         remaining: list[tuple[int, int]] = []
         for candidate in available:
-            if len(selected) < MAX_TANKS and all(
+            if all(
                 not self._game_line_of_sight(room, candidate, point)
                 for point in selected
             ):
@@ -426,8 +406,12 @@ class Game:
         """Добавляет одного бота на свободную точку появления."""
         free_points = self._free_spawn_cells(room)
         if not free_points:
-            return None
-        x, y = free_points[0]
+            spawn_points = self._spawn_points(room)
+            if not spawn_points:
+                return None
+            x, y = spawn_points[room.next_bot_index % len(spawn_points)]
+        else:
+            x, y = free_points[0]
 
         bot_name = f"Бот-{room.next_bot_index}"
         while any(t.name.casefold() == bot_name.casefold() for t in room.tanks):
@@ -450,8 +434,6 @@ class Game:
         """Добавляет count ботов (или сколько поместится). Возвращает число добавленных."""
         added = 0
         for _ in range(count):
-            if len(room.tanks) >= MAX_TANKS:
-                break
             if self._add_bot(room) is None:
                 break
             added += 1
@@ -472,8 +454,7 @@ class Game:
         room.bonuses = []
         room.wins_awarded = False
 
-        # Оставляем только живых игроков (максимум MAX_PLAYERS)
-        room.tanks = [t for t in room.tanks if not t.is_bot and t.alive][:MAX_PLAYERS]
+        room.tanks = [t for t in room.tanks if not t.is_bot and t.alive]
 
         # Волны ботов: первая волна сразу, следующая — через 30 с.
         room.next_bot_index = 1
