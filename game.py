@@ -604,6 +604,18 @@ class Game:
         for tank in room.tanks:
             tank.shells[:] = [shell for shell in tank.shells if shell.id not in destroyed]
 
+        registered_names = {name.casefold() for name in room.registrations}
+        dead_players = {
+            tank.name.casefold()
+            for tank in room.tanks
+            if not tank.alive and tank.name.casefold() in registered_names
+        }
+        if dead_players:
+            room.tanks[:] = [tank for tank in room.tanks if tank.name.casefold() not in dead_players]
+            room.registrations[:] = [
+                name for name in room.registrations if name.casefold() not in dead_players
+            ]
+
     def _collect_bonuses(self, room: Room) -> None:
         now = time.monotonic()
         kept = []

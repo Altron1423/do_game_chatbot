@@ -171,6 +171,7 @@ class GameTests(unittest.TestCase):
             x=6.5,
             y=5.5,
         )
+        self.room.registrations.append(target.name)
         attacker.shells.append(Shell("shell-1", attacker.id, 6.0, 5.5, "вправо"))
         self.room.tanks.append(target)
 
@@ -181,10 +182,15 @@ class GameTests(unittest.TestCase):
         self.assertEqual(attacker.kills, 1)
         self.assertEqual(self.room.phase, "round")
         self.assertIn(attacker, self.room.tanks)
+        self.assertNotIn(target, self.room.tanks)
+        self.assertNotIn("Цель", self.room.registrations)
         state = self.game.room_state(self.room)
         self.assertEqual(state["kills"]["Игрок"], 1)
+        self.assertNotIn("Цель", state["kills"])
         self.assertNotIn("wins", state)
 
+        self.game.join(self.room, "Цель")
+        self.assertTrue(any(tank.name == "Цель" for tank in self.room.tanks))
         self.game.join(self.room, "Поздний игрок")
         self.assertTrue(any(tank.name == "Поздний игрок" for tank in self.room.tanks))
 
