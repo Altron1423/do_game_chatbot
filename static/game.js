@@ -3,9 +3,8 @@ const ctx = board.getContext("2d");
 const statusLabel = document.querySelector("#room-status");
 const hint = document.querySelector("#hint");
 const chat = document.querySelector("#chat");
-const winsList = document.querySelector("#wins-list");
+const killsList = document.querySelector("#kills-list");
 let state = null;
-let receivedAt = 0;
 let polling = false;
 let stateRequest = null;
 let stateVersion = null;
@@ -100,21 +99,6 @@ function draw() {
     if (!tank.alive) continue;
     drawTank(tank.x, tank.y, tank.direction, tank.is_bot, tank.shielded, tank.color);
   }
-  const remaining = state && state.countdown_ends_at ? remainingSeconds(state, performance.now()) : null;
-  if (remaining != null) {
-    const remainingText = state.status === "countdown" ? Math.ceil(remaining).toString() : "0";
-    ctx.font = "5px system-ui";
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.shadowColor = "rgba(0,0,0,.85)";
-    ctx.shadowBlur = .18;
-    ctx.fillStyle = "#ffe96d";
-    ctx.fillText(remainingText, mapWidth / 2, mapHeight / 2 - 1.5);
-    ctx.shadowBlur = 0;
-    ctx.font = ".65px system-ui";
-    ctx.fillStyle = "#f3f6f8";
-    ctx.fillText(state.status === "countdown" ? "СТАРТ ЧЕРЕЗ" : "РАУНД ИДЁТ", mapWidth / 2, mapHeight / 2 + .4);
-  }
 }
 
 function drawBonus(type, cx, cy) {
@@ -191,14 +175,14 @@ function showMessages(messages) {
   chat.scrollTop = chat.scrollHeight;
 }
 
-function showWins(wins) {
-  if (!winsList) return;
-  const entries = Object.entries(wins || {});
+function showKills(kills) {
+  if (!killsList) return;
+  const entries = Object.entries(kills || {});
   if (!entries.length) {
-    winsList.innerHTML = '<li class="empty">Пока нет побед</li>';
+    killsList.innerHTML = '<li class="empty">Пока нет убийств</li>';
     return;
   }
-  winsList.replaceChildren();
+  killsList.replaceChildren();
   for (const [name, count] of entries) {
     const item = document.createElement("li");
     const label = document.createElement("span");
@@ -206,19 +190,8 @@ function showWins(wins) {
     const value = document.createElement("strong");
     value.textContent = String(count);
     item.append(label, value);
-    winsList.append(item);
+    killsList.append(item);
   }
-}
-
-function remainingSeconds(next, now) {
-  if (!next.countdown_ends_at) return null;
-  const serverNow = (next.server_time || Date.now() / 1000) + (now - receivedAt) / 1000;
-  return Math.max(0, next.countdown_ends_at - serverNow);
-}
-
-function countdownLabel(next) {
-  const remaining = remainingSeconds(next, performance.now());
-  return remaining == null ? "" : ` · старт через ${Math.ceil(remaining)} с`;
 }
 
 async function pollState() {
@@ -234,16 +207,11 @@ async function pollState() {
     const next = await response.json();
     state = next;
     stateVersion = next.state_version;
-    receivedAt = performance.now();
     draw();
     showMessages(next.messages);
-    showWins(next.wins);
-    statusLabel.textContent = `${next.status} · танков: ${next.tanks_alive}${countdownLabel(next)}`;
-    hint.textContent = next.status === "waiting"
-      ? "Для регистрации отправьте в терминальном клиенте: «войти Имя»."
-      : next.status === "countdown"
-        ? "Регистрация открыта. Танки появятся после отсчёта."
-        : "Раунд идёт. Команды доступны через терминальный клиент.";
+    showKills(next.kills);
+    statusLabel.textContent = `Раунд идёт · танков: ${next.tanks_alive}`;
+    hint.textContent = "Игроки могут подключаться в любой момент. Команды доступны через терминальный клиент.";
   } catch (error) {
     if (error.name !== "AbortError") {
       statusLabel.textContent = error.message;

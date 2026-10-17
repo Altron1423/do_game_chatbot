@@ -1,7 +1,7 @@
 import time
 import unittest
 
-from game import Bonus, COMMANDS, Game, MAP_HEIGHT, MAP_TEMPLATE, MAP_WIDTH, Room
+from game import Bonus, COMMANDS, Game, MAP_HEIGHT, MAP_TEMPLATE, MAP_WIDTH, Shell, Tank
 
 
 class GameTests(unittest.TestCase):
@@ -44,19 +44,15 @@ class GameTests(unittest.TestCase):
     def test_join_command_registers_in_shared_room(self):
         message = self.game.post_message(self.room, "Аня", " ВОЙТИ Аня ")
         self.assertEqual(self.room.registrations, ["Аня"])
-        self.assertEqual(self.room.phase, "countdown")
-        self.assertGreater(self.room.countdown_ends_at, time.time())
+        self.assertEqual(self.room.phase, "round")
+        self.assertTrue(any(tank.name == "Аня" for tank in self.room.tanks))
         self.assertFalse(message["is_command"])
 
-    def test_first_join_starts_countdown_without_restarting_it_for_next_player(self):
+    def test_players_can_join_during_active_round(self):
         self.game.join(self.room, "Аня")
-        countdown_ends_at = self.room.countdown_ends_at
-        self.assertEqual(self.room.phase, "countdown")
-        self.assertGreater(countdown_ends_at, time.time())
-
         self.game.join(self.room, "Борис")
 
-        self.assertEqual(self.room.countdown_ends_at, countdown_ends_at)
+        self.assertEqual(self.room.phase, "round")
         self.assertEqual(self.room.registrations, ["Аня", "Борис"])
 
     def test_registration_has_no_player_limit(self):
@@ -64,14 +60,10 @@ class GameTests(unittest.TestCase):
             self.game.join(self.room, f"Игрок {number}")
         self.assertEqual(len(self.room.registrations), 100)
 
-    def test_round_starts_with_registered_tank_and_bot(self):
-        self.game.join(self.room, "Аня")
-        self.room.countdown_ends_at = time.time() - 1
-        self.game.process_room_events(self.room)
+    def test_round_is_active_when_game_is_created(self):
         self.assertEqual(self.room.phase, "round")
-        self.assertEqual([tank.name for tank in self.room.tanks], ["Аня", "Бот-1"])
-        self.assertFalse(self.room.tanks[0].is_bot)
-        self.assertTrue(self.room.tanks[1].is_bot)
+        self.assertTrue(self.room.tanks)
+        self.assertTrue(self.room.tanks[0].is_bot)
 
     def test_only_registered_tank_receives_command(self):
         self.begin_round()
@@ -143,19 +135,35 @@ class GameTests(unittest.TestCase):
         self.assertGreater(player.shield_until, time.monotonic())
         self.assertGreater(enemy.frozen_until, time.monotonic())
 
-    def test_countdown_posts_messages_to_chat_until_start(self):
-        self.game.join(self.room, "Аня")
-        self.assertIn(
-            "Раунд начнётся через 15 с",
-            [message["text"] for message in self.room.messages if message["sender"] == "Комната"],
+    def test_kill_is_counted_and_last_tank_does_not_end_round(self):
+        attacker = self.room.tanks[0]
+        attacker.name = "Игрок"
+        attacker.is_bot = False
+        attacker.x = 5.5
+        attacker.y = 5.5
+        target = Tank(
+            id=self.room.object_id("tank"),
+            name="Цель",
+            is_bot=False,
+            x=6.5,
+            y=5.5,
         )
-        self.room.countdown_ends_at = time.time() + 5
-        self.room.next_countdown_message_at = None
+        attacker.shells.append(Shell("shell-1", attacker.id, 6.0, 5.5, "вправо"))
+        self.room.tanks.append(target)
+
+        self.game._move_shells(self.room, 0.1)
         self.game.process_room_events(self.room)
-        self.assertIn(
-            "Старт через 5 с",
-            [message["text"] for message in self.room.messages if message["sender"] == "Комната"],
-        )
+
+        self.assertFalse(target.alive)
+        self.assertEqual(attacker.kills, 1)
+        self.assertEqual(self.room.phase, "round")
+        self.assertIn(attacker, self.room.tanks)
+        state = self.game.room_state(self.room)
+        self.assertEqual(state["kills"]["Игрок"], 1)
+        self.assertNotIn("wins", state)
+
+        self.game.join(self.room, "Поздний игрок")
+        self.assertTrue(any(tank.name == "Поздний игрок" for tank in self.room.tanks))
 
     def test_map_template_matches_documented_size(self):
         self.assertEqual(MAP_WIDTH, 26)
