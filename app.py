@@ -1,7 +1,9 @@
+from __future__ import annotations
+
 import asyncio
 import secrets
 from pathlib import Path
-from typing import Annotated
+from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Response, status
 from fastapi.responses import FileResponse
@@ -34,7 +36,7 @@ class MessageRequest(BaseModel):
     text: str = Field(min_length=1, max_length=500)
 
 
-def require_admin(credentials: Annotated[HTTPBasicCredentials, Depends(security)]) -> None:
+def require_admin(credentials: HTTPBasicCredentials = Depends(security)) -> None:
     user_ok = secrets.compare_digest(credentials.username, ADMIN_USERNAME)
     password_ok = secrets.compare_digest(credentials.password, ADMIN_PASSWORD)
     if not (user_ok and password_ok):
@@ -184,7 +186,7 @@ async def send_command(room_id: str, payload: MessageRequest):
 
 
 @app.get("/api/rooms/{room_id}/state")
-async def room_state(room_id: str, after: int | None = Query(default=None, ge=0)):
+async def room_state(room_id: str, after: Optional[int] = Query(default=None, ge=0)):
     room = find_room(room_id)
     if after is not None and room.state_version == after:
         async with state_condition:
