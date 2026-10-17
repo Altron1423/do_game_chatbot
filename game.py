@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 import time
 from collections import deque
@@ -512,60 +513,95 @@ class Game:
             self.fire(room, tank)
 
     def _move_shells(self, room: Room, dt: float) -> None:
-        for tank in room.tanks:
-            kept: list[Shell] = []
-            for shell in tank.shells:
+        shells = [shell for tank in room.tanks for shell in tank.shells]
+        if not shells:
+            return
+
+        steps = max(1, math.ceil(max(shell.speed for shell in shells) * dt / 0.08))
+        step_dt = dt / steps
+        destroyed: set[str] = set()
+
+        for _ in range(steps):
+            active = [shell for shell in shells if shell.id not in destroyed]
+            if not active:
+                break
+
+            for shell in active:
                 dx, dy = DIRECTIONS[shell.direction]
-                distance = shell.speed * dt
-                steps = max(1, int(distance / 0.08))
-                alive = True
-                for _ in range(steps):
-                    shell.x += dx * distance / steps
-                    shell.y += dy * distance / steps
-                    cx, cy = int(shell.x), int(shell.y)
-                    if not (0 <= cx < MAP_WIDTH and 0 <= cy < MAP_HEIGHT):
-                        alive = False
-                        break
-                    tile = room.tiles[cy][cx]
-                    if tile == 1:
-                        hp_key = (cx, cy)
-                        room.brick_hp[hp_key] = room.brick_hp.get(hp_key, 2) - 1
-                        if room.brick_hp[hp_key] <= 0:
-                            room.tiles[cy][cx] = 0
-                            room.brick_hp.pop(hp_key, None)
-                        alive = False
-                        break
-                    if tile in (2, 6):
-                        alive = False
-                        break
-                    for target in room.tanks:
-                        if target.alive and target.id != shell.owner_id and abs(target.x - shell.x) < 0.38 and abs(target.y - shell.y) < 0.38:
-                            if target.shield_until < time.monotonic():
-                                target.alive = False
-                                target.shells.clear()
-                                owner = next(
-                                    (tank for tank in room.tanks if tank.id == shell.owner_id),
-                                    None,
-                                )
-                                if owner is not None:
-                                    owner.kills += 1
-                                if random.random() < 0.3:
-                                    room.bonuses.append(
-                                        Bonus(
-                                            id=room.object_id("bonus"),
-                                            kind=random.choice(BONUS_TYPES),
-                                            x=cx,
-                                            y=cy,
-                                            expires_at=time.monotonic() + 20,
-                                        )
-                                    )
-                            alive = False
-                            break
-                    if not alive:
-                        break
-                if alive:
-                    kept.append(shell)
-            tank.shells = kept
+                shell.x += dx * shell.speed * step_dt
+                shell.y += dy * shell.speed * step_dt
+
+            collision_distance_squared = 0.18 ** 2
+            nearby_shells: dict[tuple[int, int], list[Shell]] = {}
+            for shell in active:
+                cell = (int(shell.x), int(shell.y))
+                for cell_x in range(cell[0] - 1, cell[0] + 2):
+                    for cell_y in range(cell[1] - 1, cell[1] + 2):
+                        for other in nearby_shells.get((cell_x, cell_y), []):
+                            distance_x = shell.x - other.x
+                            distance_y = shell.y - other.y
+                            if distance_x ** 2 + distance_y ** 2 <= collision_distance_squared:
+                                destroyed.add(shell.id)
+                                destroyed.add(other.id)
+                nearby_shells.setdefault(cell, []).append(shell)
+
+            for shell in active:
+                if shell.id in destroyed:
+                    continue
+                cx, cy = int(shell.x), int(shell.y)
+                if not (0 <= cx < MAP_WIDTH and 0 <= cy < MAP_HEIGHT):
+                    destroyed.add(shell.id)
+                    continue
+
+                tile = room.tiles[cy][cx]
+                if tile == 1:
+                    hp_key = (cx, cy)
+                    room.brick_hp[hp_key] = room.brick_hp.get(hp_key, 2) - 1
+                    if room.brick_hp[hp_key] <= 0:
+                        room.tiles[cy][cx] = 0
+                        room.brick_hp.pop(hp_key, None)
+                    destroyed.add(shell.id)
+                    continue
+                if tile in (2, 6):
+                    destroyed.add(shell.id)
+                    continue
+
+                target = next(
+                    (
+                        tank for tank in room.tanks
+                        if tank.alive and tank.id != shell.owner_id
+                        and abs(tank.x - shell.x) < 0.38
+                        and abs(tank.y - shell.y) < 0.38
+                    ),
+                    None,
+                )
+                if target is None:
+                    continue
+
+                if target.shield_until < time.monotonic():
+                    target.alive = False
+                    destroyed.update(owned_shell.id for owned_shell in target.shells)
+                    target.shells.clear()
+                    owner = next(
+                        (tank for tank in room.tanks if tank.id == shell.owner_id),
+                        None,
+                    )
+                    if owner is not None:
+                        owner.kills += 1
+                    if random.random() < 0.3:
+                        room.bonuses.append(
+                            Bonus(
+                                id=room.object_id("bonus"),
+                                kind=random.choice(BONUS_TYPES),
+                                x=cx,
+                                y=cy,
+                                expires_at=time.monotonic() + 20,
+                            )
+                        )
+                destroyed.add(shell.id)
+
+        for tank in room.tanks:
+            tank.shells[:] = [shell for shell in tank.shells if shell.id not in destroyed]
 
     def _collect_bonuses(self, room: Room) -> None:
         now = time.monotonic()

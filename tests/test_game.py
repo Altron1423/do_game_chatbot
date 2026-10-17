@@ -103,6 +103,28 @@ class GameTests(unittest.TestCase):
         self.game.fire(self.room, player)
         self.assertEqual(len(player.shells), 2)
 
+    def test_shells_destroy_each_other_on_collision(self):
+        first = self.room.tanks[0]
+        second = Tank(
+            id=self.room.object_id("tank"),
+            name="Второй",
+            is_bot=False,
+            x=3.5,
+            y=3.5,
+        )
+        first.x = 2.5
+        first.y = 2.5
+        first.shells.append(Shell("shell-a", first.id, 5.0, 5.5, "вправо"))
+        second.shells.append(Shell("shell-b", second.id, 6.0, 5.5, "влево"))
+        self.room.tanks.append(second)
+
+        self.game._move_shells(self.room, 0.1)
+
+        self.assertEqual(first.shells, [])
+        self.assertEqual(second.shells, [])
+        self.assertEqual(first.kills, 0)
+        self.assertEqual(second.kills, 0)
+
     def test_bot_takes_over_after_thirty_seconds_idle(self):
         self.begin_round()
         player = self.room.tanks[0]
