@@ -161,6 +161,7 @@ class GameTests(unittest.TestCase):
         attacker = self.room.tanks[0]
         attacker.name = "Игрок"
         attacker.is_bot = False
+        self.room.registrations.append(attacker.name)
         attacker.x = 5.5
         attacker.y = 5.5
         target = Tank(
@@ -186,6 +187,30 @@ class GameTests(unittest.TestCase):
 
         self.game.join(self.room, "Поздний игрок")
         self.assertTrue(any(tank.name == "Поздний игрок" for tank in self.room.tanks))
+
+    def test_kill_stats_only_include_registered_players(self):
+        bot = self.room.tanks[0]
+        bot.kills = 9
+        player = Tank(
+            id=self.room.object_id("tank"),
+            name="Игрок",
+            is_bot=True,
+            x=2.5,
+            y=2.5,
+            kills=3,
+        )
+        unregistered_tank = Tank(
+            id=self.room.object_id("tank"),
+            name="Не зарегистрирован",
+            is_bot=False,
+            x=3.5,
+            y=3.5,
+            kills=12,
+        )
+        self.room.tanks.extend((player, unregistered_tank))
+        self.room.registrations.append(player.name)
+
+        self.assertEqual(self.game.room_state(self.room)["kills"], {"Игрок": 3})
 
     def test_map_template_matches_documented_size(self):
         self.assertEqual(MAP_WIDTH, 26)

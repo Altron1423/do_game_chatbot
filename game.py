@@ -520,6 +520,7 @@ class Game:
         steps = max(1, math.ceil(max(shell.speed for shell in shells) * dt / 0.08))
         step_dt = dt / steps
         destroyed: set[str] = set()
+        registered_names = {name.casefold() for name in room.registrations}
 
         for _ in range(steps):
             active = [shell for shell in shells if shell.id not in destroyed]
@@ -586,7 +587,7 @@ class Game:
                         (tank for tank in room.tanks if tank.id == shell.owner_id),
                         None,
                     )
-                    if owner is not None:
+                    if owner is not None and owner.name.casefold() in registered_names:
                         owner.kills += 1
                     if random.random() < 0.3:
                         room.bonuses.append(
@@ -788,6 +789,7 @@ class Game:
 
     def room_state(self, room: Room) -> dict:
         tiles = room.tiles or MAP_TEMPLATE
+        registered_names = {name.casefold() for name in room.registrations}
         return {
             **self.room_summary(room),
             "state_version": room.state_version,
@@ -830,7 +832,11 @@ class Game:
                 for bonus in room.bonuses
             ],
             "kills": dict(sorted(
-                ((tank.name, tank.kills) for tank in room.tanks),
+                (
+                    (tank.name, tank.kills)
+                    for tank in room.tanks
+                    if tank.name.casefold() in registered_names
+                ),
                 key=lambda item: -item[1],
             )),
             "messages": list(room.messages),
