@@ -25,6 +25,7 @@ class TankClient:
         self.request_queue = queue.Queue()
         self.result_queue = queue.Queue()
         self.stop_worker = threading.Event()
+        self.monitor_stop = threading.Event()
         self.pressed_keys = set()
         self.player_name = ""
         self.connected = False
@@ -88,7 +89,7 @@ class TankClient:
                 with urllib.request.urlopen(request, timeout=5) as response:
                     body = response.read()
                 details = json.loads(body.decode("utf-8")) if body else {}
-                self.result_queue.put((action, True, details.get("detail", "")))
+                self.result_queue.put((action, True, details if action == "join" else ""))
             except urllib.error.HTTPError as error:
                 body = error.read().decode("utf-8", errors="replace")
                 try:
@@ -107,19 +108,56 @@ class TankClient:
                 action, success, detail = self.result_queue.get_nowait()
                 if action == "join":
                     if success:
+                        tank_id = detail.get("your_tank_id")
+                        if not tank_id:
+                            self.join_button.configure(state="normal")
+                            self.status.set("Сервер не вернул идентификатор танка.")
+                            continue
                         self.connected = True
                         self.name_entry.configure(state="disabled")
                         self.root.focus_set()
                         self.status.set(f"Подключено как {self.player_name}.")
+                        self.monitor_stop = threading.Event()
+                        threading.Thread(
+                            target=self.watch_tank,
+                            args=(tank_id, self.monitor_stop),
+                            daemon=True,
+                        ).start()
                     else:
                         self.join_button.configure(state="normal")
                         self.status.set(f"Не удалось подключиться: {detail}")
+                elif action == "dead":
+                    self.connected = False
+                    self.pressed_keys.clear()
+                    self.name_entry.configure(state="normal")
+                    self.join_button.configure(state="normal")
+                    self.status.set(detail)
                 elif not success:
                     self.status.set(f"Ошибка отправки команды: {detail}")
         except queue.Empty:
             pass
         if not self.stop_worker.is_set():
             self.root.after(100, self.check_results)
+
+    def watch_tank(self, tank_id, stop_event):
+        state_version = None
+        while not stop_event.is_set():
+            after = "" if state_version is None else f"?after={state_version}"
+            request = urllib.request.Request(f"{SERVER_URL}/api/state{after}")
+            try:
+                with urllib.request.urlopen(request, timeout=35) as response:
+                    state = json.loads(response.read().decode("utf-8"))
+                state_version = state["state_version"]
+                if not any(tank["id"] == tank_id for tank in state["tanks"]):
+                    self.result_queue.put((
+                        "dead",
+                        True,
+                        "Ваш танк уничтожен. Вы отключены от игры. Нажмите «Подключиться», чтобы войти снова.",
+                    ))
+                    return
+            except Exception:
+                if stop_event.wait(1):
+                    return
 
     def on_key_press(self, event):
         key = event.keysym.lower()
@@ -140,6 +178,7 @@ class TankClient:
 
     def close(self):
         self.stop_worker.set()
+        self.monitor_stop.set()
         self.root.destroy()
 
 
